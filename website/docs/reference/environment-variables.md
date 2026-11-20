@@ -724,6 +724,14 @@ Connect Hermes to [Photon](https://photon.codes/) / Spectrum (iMessage and other
 | `PHOTON_SIDECAR_AUTOSTART` | Spawn the Node sidecar on connect (`true`/`false`, default `true`). |
 | `PHOTON_DASHBOARD_HOST` | Photon Dashboard API host (default `https://app.photon.codes`). |
 | `PHOTON_SPECTRUM_HOST` | Photon Spectrum API host (default `https://spectrum.photon.codes`). |
+| `PHOTON_MINI_APPS` | Enable the sidecar's `/send-mini-app` live mini-app card route (exact `true`, default off). Requires the mini-app policy file. |
+| `PHOTON_INJECT_ENABLED` | Enable the sidecar's `/inject` mini-app interaction return path (exact `true`, default off). Requires the mini-app policy file. |
+| `PHOTON_MINI_APPS_CONFIG` | Mini-app policy allowlist path (default `~/.hermes/photon-mini-apps.json`; must be mode `0600` — missing/invalid/readable-by-others fails closed). |
+| `PHOTON_MINI_APP_RATE_LIMIT` | `/send-mini-app` sliding-window rate limit (default `10`). |
+| `PHOTON_MINI_APP_RATE_WINDOW_MS` | `/send-mini-app` rate-limit window in ms (default `60000`). |
+| `PHOTON_INJECT_RATE_LIMIT` | `/inject` sliding-window rate limit (default `10`). |
+| `PHOTON_INJECT_RATE_WINDOW_MS` | `/inject` rate-limit window in ms (default `60000`). |
+| `PHOTON_INJECT_MAX_TEXT` | `/inject` maximum text length in characters (default `500`). |
 
 ### Buzz (Nostr communities)
 

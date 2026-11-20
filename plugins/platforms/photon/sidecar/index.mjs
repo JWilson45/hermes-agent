@@ -41,6 +41,19 @@
 //       body: {"spaceId": "...", "text": "...", "effect": "confetti" | ...}
 //   - POST /typing      -> {"ok": true}
 //       body: {"spaceId": "...", "state": "start" | "stop"}
+//   - POST /inject      -> {"ok": true, "messageId": "inject-..."}
+//       body: {"spaceId": "<allowlisted chat id>", "text": "..."}
+//       Mini-app return path (PHOTON_INJECT_ENABLED=true only): synthesizes
+//       an inbound DM text event on /inbound for a chat allowlisted in
+//       ~/.hermes/photon-mini-apps.json. Rate-limited (10/min default),
+//       sanitized, fail-closed when the policy file is missing/invalid.
+//   - POST /send-mini-app -> {"ok": true, "messageId": "..."}
+//       body: {"spaceId": "<allowlisted chat id>", "url": "https://..."}
+//       Sends a LIVE mini-app card (PHOTON_MINI_APPS=true only). Multiple
+//       sends allowed; sliding rate limit 10/min default
+//       (PHOTON_MINI_APP_RATE_LIMIT / PHOTON_MINI_APP_RATE_WINDOW_MS).
+//       Recipient must be in allowedSpaces; URL must be https and start
+//       with an allowedUrlPrefixes entry (same policy file as /inject).
 //   - POST /shutdown    -> {"ok": true}; then process exits
 //
 // On SIGINT/SIGTERM the sidecar calls `app.stop()` (3s graceful) before
@@ -61,9 +74,20 @@
 //                          detection so a dead gateway can't orphan us)
 //   PHOTON_TELEMETRY       enable Spectrum SDK telemetry ("true"/"1"/"on"/"yes";
 //                          default off — toggle with `hermes photon telemetry`)
+//   PHOTON_MINI_APPS       "true" enables POST /send-mini-app (default off)
+//   PHOTON_INJECT_ENABLED  "true" enables POST /inject (default off)
+//   PHOTON_MINI_APPS_CONFIG  policy file path (default
+//                          ~/.hermes/photon-mini-apps.json, must be 0600)
+//   PHOTON_MINI_APP_RATE_LIMIT / PHOTON_MINI_APP_RATE_WINDOW_MS
+//                          /send-mini-app sliding rate limit (10 / 60000ms)
+//   PHOTON_INJECT_RATE_LIMIT / PHOTON_INJECT_RATE_WINDOW_MS /
+//   PHOTON_INJECT_MAX_TEXT   /inject tunables (10 / 60000ms / 500 chars)
 
 import http from "node:http";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import { once } from "node:events";
 import { patchSpectrumTs } from "./patch-spectrum-mixed-attachments.mjs";
 import { chooseSendFormat } from "./send-format.mjs";
@@ -305,6 +329,7 @@ let Spectrum,
   spectrumText,
   spectrumMarkdown,
   spectrumRichlink,
+  spectrumApp,
   spectrumTyping,
   spectrumPoll,
   imessageEffect;
@@ -317,6 +342,7 @@ try {
     text: spectrumText,
     markdown: spectrumMarkdown,
     richlink: spectrumRichlink,
+    app: spectrumApp,
     typing: spectrumTyping,
   } = await import("spectrum-ts"));
   ({ imessage, effect: imessageEffect } = await import("spectrum-ts/providers/imessage"));
@@ -941,6 +967,11 @@ function handleInbound(req, res) {
     }
   }
   setConsumer(res);
+  // Flush the 200 + headers immediately so the consumer's HTTP client sees
+  // the stream as open right away (otherwise attachment waits for the first
+  // heartbeat write, up to 25s — and /inject's consumer check, while already
+  // true, is invisible to a client still awaiting response headers).
+  res.flushHeaders();
   // Heartbeat keeps the socket warm through idle periods and lets the Python
   // side detect a dead pipe promptly.
   const heartbeat = setInterval(() => {
@@ -959,7 +990,7 @@ function handleInbound(req, res) {
   res.on("error", cleanup);
 }
 
-async function resolveSpace(spaceId) {
+async function resolveSpace(spaceId, { redactErrors = false } = {}) {
   const cached = knownSpaces.get(spaceId);
   if (cached) return cached;
 
@@ -977,8 +1008,8 @@ async function resolveSpace(spaceId) {
       space = await im.space.create(phoneTarget);
     } catch (e) {
       console.error(
-        "photon-sidecar: phone->DM space.create failed: " +
-          (e && e.stack ? e.stack : String(e))
+        "photon-sidecar: phone->DM space.create failed" +
+          (redactErrors ? " (details redacted)" : ": " + (e && e.stack ? e.stack : String(e)))
       );
     }
   }
@@ -990,8 +1021,8 @@ async function resolveSpace(spaceId) {
       space = await im.space.get(spaceId);
     } catch (e) {
       console.error(
-        "photon-sidecar: space.get failed: " +
-          (e && e.stack ? e.stack : String(e))
+        "photon-sidecar: space.get failed" +
+          (redactErrors ? " (details redacted)" : ": " + (e && e.stack ? e.stack : String(e)))
       );
     }
   }
@@ -1019,6 +1050,144 @@ function isHttpUrl(value) {
   } catch {
     return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Mini-app policy: the recipient + URL allowlist lives in a config
+// file, read per-request with an mtime cache, FAIL CLOSED when the file is
+// missing / invalid / malformed / not owner-only (must be 0600):
+//   ~/.hermes/photon-mini-apps.json   (override: PHOTON_MINI_APPS_CONFIG)
+//   { "allowedSpaces": ["any;-;+<E164>", ...],
+//     "allowedUrlPrefixes": ["https://<host>/<path>", ...] }
+// A card URL is allowed iff it is https and STARTS WITH an allowed prefix;
+// spaces must match an entry EXACTLY (no trimming/normalization).
+// The sidecar keeps this loader inline so it stays a single self-contained
+// file (the adapter supervises one script). Keep the rules in sync with the
+// documented policy schema below when changing them.
+const MINI_APPS_CONFIG_PATH =
+  process.env.PHOTON_MINI_APPS_CONFIG ||
+  path.join(os.homedir(), ".hermes", "photon-mini-apps.json");
+const MINI_APP_SPACE_RE = /^any;-;\+\d{6,}$/;
+
+function validMiniAppPrefix(p) {
+  if (typeof p !== "string" || !p || p !== p.trim()) return false;
+  if (!p.startsWith("https://")) return false;
+  try {
+    const u = new URL(p);
+    return u.protocol === "https:" && !u.username && !u.password;
+  } catch {
+    return false;
+  }
+}
+
+function validateMiniAppConfig(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const keys = Object.keys(raw);
+  if (keys.length !== 2 || !keys.includes("allowedSpaces") || !keys.includes("allowedUrlPrefixes")) return null;
+  const { allowedSpaces, allowedUrlPrefixes } = raw;
+  if (!Array.isArray(allowedSpaces) || allowedSpaces.length === 0) return null;
+  if (!allowedSpaces.every((s) => typeof s === "string" && MINI_APP_SPACE_RE.test(s))) return null;
+  if (!Array.isArray(allowedUrlPrefixes) || allowedUrlPrefixes.length === 0) return null;
+  if (!allowedUrlPrefixes.every(validMiniAppPrefix)) return null;
+  return { allowedSpaces, allowedUrlPrefixes };
+}
+
+// mtime cache: stat on every request, re-parse only when mtimeMs/size/ino
+// change. Permission bits are checked on EVERY call (chmod alone must
+// invalidate). Errors cache as null until the file changes again.
+const miniAppConfigCache = { key: null, value: null };
+function readMiniAppConfig() {
+  let st;
+  try {
+    st = fs.statSync(MINI_APPS_CONFIG_PATH);
+  } catch {
+    miniAppConfigCache.key = null;
+    miniAppConfigCache.value = null;
+    return null;
+  }
+  if (!st.isFile()) return null;
+  if (process.platform !== "win32" && (st.mode & 0o077) !== 0) return null;
+  const key = `${st.mtimeMs}:${st.size}:${st.ino}`;
+  if (key === miniAppConfigCache.key) return miniAppConfigCache.value;
+  let value = null;
+  try {
+    value = validateMiniAppConfig(JSON.parse(fs.readFileSync(MINI_APPS_CONFIG_PATH, "utf8")));
+  } catch {
+    value = null;
+  }
+  miniAppConfigCache.key = key;
+  miniAppConfigCache.value = value;
+  return value;
+}
+
+function policyUnavailable(res) {
+  res.statusCode = 503;
+  res.setHeader("Content-Type", "application/json");
+  return res.end(JSON.stringify({ ok: false, error: "mini-app policy unavailable" }));
+}
+
+// ---------------------------------------------------------------------------
+// Mini-app interaction return path: POST /inject (default OFF).
+//
+// A button press in the Photon mini app hits a local callback server, which
+// forwards here. We synthesize an inbound event in EXACTLY the shape
+// normalizeEvent() produces for a real DM text message and push it onto the
+// same /inbound NDJSON stream the Python adapter consumes — so Hermes sees a
+// normal-looking inbound message from an approved chat and can reply.
+//
+// Safety: token-authenticated (global check), env-gated (exact "true"),
+// config-file allowlist (exact space ids, fail closed), strict {spaceId, text}
+// body, text length cap, control-character rejection, sliding-window rate
+// limit. Synthetic events deliberately do NOT call
+// noteInboundYield()/markStreamHealthy(): an inject must never mask a zombie
+// upstream gRPC stream. They are also not stored in knownMessages (there is
+// no real SDK Message to react to).
+const INJECT_ENABLED = process.env.PHOTON_INJECT_ENABLED === "true";
+const INJECT_MAX_TEXT = Number(process.env.PHOTON_INJECT_MAX_TEXT) || 500;
+const INJECT_RATE_LIMIT = Number(process.env.PHOTON_INJECT_RATE_LIMIT) || 10;
+const INJECT_RATE_WINDOW_MS =
+  Number(process.env.PHOTON_INJECT_RATE_WINDOW_MS) || 60 * 1000;
+// C0/C1 control chars (would also break NDJSON framing if unescaped) plus
+// U+FFFC, which the adapter treats as an attachment placeholder.
+const INJECT_BAD_TEXT_RE = /[\u0000-\u001f\u007f-\u009f\ufffc]/;
+const injectTimestamps = [];
+
+function injectRateOk(now = Date.now()) {
+  while (injectTimestamps.length && now - injectTimestamps[0] >= INJECT_RATE_WINDOW_MS) {
+    injectTimestamps.shift();
+  }
+  if (injectTimestamps.length >= INJECT_RATE_LIMIT) return false;
+  injectTimestamps.push(now);
+  return true;
+}
+
+// Mirrors normalizeEvent(space, message) for an inbound DM text message.
+function buildInjectEvent(spaceId, text) {
+  const phone = phoneTargetFromSpaceId(spaceId);
+  return {
+    messageId: `inject-${crypto.randomUUID()}`,
+    platform: "iMessage",
+    space: { id: spaceId, type: "dm", phone },
+    sender: { id: phone },
+    content: { type: "text", text },
+    timestamp: new Date().toISOString(),
+  };
+}
+
+// /send-mini-app: MULTIPLE sends allowed (no one-shot guard),
+// bounded by a sliding-window rate limit (default 10/min, tunable).
+const MINI_APP_RATE_LIMIT = Number(process.env.PHOTON_MINI_APP_RATE_LIMIT) || 10;
+const MINI_APP_RATE_WINDOW_MS =
+  Number(process.env.PHOTON_MINI_APP_RATE_WINDOW_MS) || 60 * 1000;
+const miniAppTimestamps = [];
+
+function miniAppRateOk(now = Date.now()) {
+  while (miniAppTimestamps.length && now - miniAppTimestamps[0] >= MINI_APP_RATE_WINDOW_MS) {
+    miniAppTimestamps.shift();
+  }
+  if (miniAppTimestamps.length >= MINI_APP_RATE_LIMIT) return false;
+  miniAppTimestamps.push(now);
+  return true;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -1064,6 +1233,91 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const body = await readBody(req);
+    if (req.url === "/inject") {
+      if (!INJECT_ENABLED) {
+        return badRequest(res, "inbound injection is disabled");
+      }
+      const keys = Object.keys(body || {});
+      if (keys.some((k) => k !== "spaceId" && k !== "text")) {
+        return badRequest(res, "only spaceId and text are accepted");
+      }
+      const { spaceId, text } = body || {};
+      const policy = readMiniAppConfig();
+      if (!policy) return policyUnavailable(res);
+      if (!policy.allowedSpaces.includes(spaceId)) {
+        return badRequest(res, "unapproved inject target");
+      }
+      if (typeof text !== "string" || !text.trim()) {
+        return badRequest(res, "text is required");
+      }
+      if (text.length > INJECT_MAX_TEXT) {
+        return badRequest(res, "text too long");
+      }
+      if (INJECT_BAD_TEXT_RE.test(text)) {
+        return badRequest(res, "text contains forbidden characters");
+      }
+      if (!injectRateOk()) {
+        res.statusCode = 429;
+        res.setHeader("Content-Type", "application/json");
+        return res.end(JSON.stringify({ ok: false, error: "inject rate limit exceeded" }));
+      }
+      // Only deliver while the adapter is attached; never queue synthetic
+      // events for a consumer that may never come.
+      if (!consumerRes) {
+        res.statusCode = 503;
+        res.setHeader("Content-Type", "application/json");
+        return res.end(JSON.stringify({ ok: false, error: "no inbound consumer attached" }));
+      }
+      const event = buildInjectEvent(spaceId, text);
+      await deliver(JSON.stringify(event));
+      return ok(res, { messageId: event.messageId });
+    }
+    if (req.url === "/send-mini-app") {
+      if (process.env.PHOTON_MINI_APPS !== "true") {
+        return badRequest(res, "mini-app cards are disabled");
+      }
+      const keys = Object.keys(body || {});
+      if (keys.some((k) => k !== "spaceId" && k !== "url")) {
+        return badRequest(res, "only spaceId and url are accepted");
+      }
+      const { spaceId, url } = body || {};
+      const policy = readMiniAppConfig();
+      if (!policy) return policyUnavailable(res);
+      if (!policy.allowedSpaces.includes(spaceId)) {
+        return badRequest(res, "unapproved mini-app target");
+      }
+      // https only, no surrounding whitespace or control chars, and the URL
+      // must START WITH an allowed prefix (exact string semantics).
+      if (
+        typeof url !== "string" || !url || url !== url.trim() ||
+        /[\u0000-\u001f\u007f]/.test(url) ||
+        !url.startsWith("https://") ||
+        !policy.allowedUrlPrefixes.some((p) => url.startsWith(p))
+      ) {
+        return badRequest(res, "unapproved mini-app url");
+      }
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+          return badRequest(res, "unapproved mini-app url");
+        }
+      } catch {
+        return badRequest(res, "unapproved mini-app url");
+      }
+      if (!miniAppRateOk()) {
+        res.statusCode = 429;
+        res.setHeader("Content-Type", "application/json");
+        return res.end(JSON.stringify({ ok: false, error: "mini-app rate limit exceeded" }));
+      }
+      try {
+        const space = await resolveSpace(spaceId, { redactErrors: true });
+        const result = await space.send(spectrumApp(url, { live: true }));
+        return ok(res, { messageId: result?.id || null });
+      } catch {
+        // Provider errors may contain capability URLs: never log or echo them.
+        return serverError(res, new Error("mini-app send failed"));
+      }
+    }
     if (req.url === "/send") {
       const { spaceId, text, format = "text" } = body || {};
       if (!spaceId || typeof text !== "string") {

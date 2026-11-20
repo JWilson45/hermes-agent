@@ -217,6 +217,15 @@ Common issues:
 - **Message effects are supported.** Hermes sends text with native iMessage
   bubble/screen effects through spectrum-ts' iMessage `effect()` builder
   via the sidecar's `/send-effect` endpoint.
+- **Mini-app cards are supported (opt-in, default off).** With
+  `PHOTON_MINI_APPS=true` and a valid `0600` policy file
+  (`~/.hermes/photon-mini-apps.json` — exact recipient space ids + https URL
+  prefixes), the adapter's `send_mini_app(chat_id, url)` sends a LIVE
+  mini-app card through the sidecar's `/send-mini-app` route (sliding rate
+  limit, fail closed, redacted errors). With `PHOTON_INJECT_ENABLED=true`,
+  the sidecar's `/inject` route lets your own mini-app callback server turn
+  button presses into ordinary inbound messages from allowlisted chats.
+  See the [sidecar README][sidecar-readme] for the full safety model.
 - **Photon's free quotas:** 5,000 messages per server per day,
   50 new-conversation initiations per shared line per day. Increases
   available — email `help@photon.codes`.
@@ -250,6 +259,12 @@ Common issues:
 | `PHOTON_MENTION_PATTERNS` | Hermes wake words  | JSON list / comma / newline regex patterns for group mentions |
 | `PHOTON_DASHBOARD_HOST`   | `app.photon.codes` | Override the dashboard / device-login host |
 | `PHOTON_SPECTRUM_HOST`    | `spectrum.photon.codes` | Override the Spectrum API host |
+| `PHOTON_MINI_APPS`        | `false`            | Enable the sidecar's `/send-mini-app` live-card route (exact `true`) |
+| `PHOTON_INJECT_ENABLED`   | `false`            | Enable the sidecar's `/inject` mini-app return path (exact `true`) |
+| `PHOTON_MINI_APPS_CONFIG` | `~/.hermes/photon-mini-apps.json` | Mini-app policy allowlist (must be `0600`; fail closed) |
+| `PHOTON_MINI_APP_RATE_LIMIT` / `PHOTON_MINI_APP_RATE_WINDOW_MS` | `10` / `60000` | `/send-mini-app` sliding rate limit |
+| `PHOTON_INJECT_RATE_LIMIT` / `PHOTON_INJECT_RATE_WINDOW_MS` / `PHOTON_INJECT_MAX_TEXT` | `10` / `60000` / `500` | `/inject` rate limit and text cap |
 
 [photon]: https://photon.codes/
 [app]: https://app.photon.codes/
+[sidecar-readme]: https://github.com/NousResearch/hermes-agent/blob/main/plugins/platforms/photon/sidecar/README.md

@@ -1387,6 +1387,19 @@ class PhotonAdapter(BasePlatformAdapter):
                             metadata: Optional[dict[str, Any]] = None, **kwargs) -> SendResult:
         return await self._sidecar_send_attachment(chat_id, file_path, name=file_name, caption=caption)
 
+    async def send_mini_app(self, chat_id: str, url: str, reply_to: Optional[str] = None,
+                            metadata: Optional[dict[str, Any]] = None) -> SendResult:
+        """Send a LIVE Photon mini-app card via ``/send-mini-app``.
+
+        The sidecar enforces the safety model (fail closed): the route is gated
+        on ``PHOTON_MINI_APPS=true``, the recipient must be allowlisted and the
+        URL https + prefix-allowlisted in ``~/.hermes/photon-mini-apps.json``
+        (0600), with a sliding rate limit. See the sidecar README for the
+        policy schema. Button presses return through ``/inject`` as ordinary
+        inbound messages when ``PHOTON_INJECT_ENABLED=true``.
+        """
+        return await self._post_send("/send-mini-app", {"spaceId": chat_id, "url": url}, structured=True)
+
     # send_animation: base falls back to send_image (iMessage renders GIFs inline as images).
 
     async def _sidecar_try(self, path: str, body: dict[str, Any], what: str) -> bool:

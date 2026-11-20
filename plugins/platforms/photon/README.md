@@ -173,6 +173,15 @@ All env vars are documented in `plugin.yaml`. The most important:
 - **Message effects are supported.** Text can be sent with native iMessage
   bubble/screen effects through `spectrum-ts`' iMessage `effect(...)` builder
   via the sidecar's `/send-effect` endpoint.
+- **Mini-app cards are supported (opt-in).** `PhotonAdapter.send_mini_app`
+  posts to the sidecar's `/send-mini-app` route, which sends a LIVE mini-app
+  card via spectrum-ts' `app(url, { live: true })` builder. Disabled by
+  default (`PHOTON_MINI_APPS=true` to enable) and fail-closed behind an
+  owner-only (`0600`) policy allowlist of exact recipient space ids and
+  https URL prefixes (`~/.hermes/photon-mini-apps.json`), with a sliding
+  rate limit. Button presses can return to the agent as ordinary inbound
+  messages through the gated `/inject` route (`PHOTON_INJECT_ENABLED=true`).
+  See `sidecar/README.md` for the full safety model.
 - **Cron/standalone sends require a running gateway.** Processes outside
   the gateway (cron subprocesses, `hermes send`) cannot spawn the sidecar;
   they authenticate to the gateway's live sidecar via the runtime record at
