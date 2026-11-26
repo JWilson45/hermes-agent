@@ -135,9 +135,22 @@ async def test_start_sidecar_spawns_with_stdin_pipe(
 
     monkeypatch.setattr(photon_adapter.httpx, "AsyncClient", _HealthyClient)
 
-    await adapter._start_sidecar()
+    from agent.secret_scope import set_multiplex_active, set_secret_scope, reset_secret_scope
+    for key in ("PHOTON_MINI_APPS", "PHOTON_MINI_APPS_CONFIG", "PHOTON_MINI_APP_RATE_LIMIT", "PHOTON_MINI_APP_RATE_WINDOW_MS"):
+        monkeypatch.setenv(key, "default-profile")
+    set_multiplex_active(True)
+    scope_token = set_secret_scope({"PHOTON_MINI_APPS": "true", "PHOTON_MINI_APP_RATE_LIMIT": "3"})
+    try:
+        await adapter._start_sidecar()
+    finally:
+        reset_secret_scope(scope_token)
+        set_multiplex_active(False)
 
     kwargs = spawned["kwargs"]
+    assert kwargs["env"]["PHOTON_MINI_APPS"] == "true"
+    assert kwargs["env"]["PHOTON_MINI_APP_RATE_LIMIT"] == "3"
+    assert "PHOTON_MINI_APPS_CONFIG" not in kwargs["env"]
+    assert "PHOTON_MINI_APP_RATE_WINDOW_MS" not in kwargs["env"]
     assert kwargs["stdin"] is subprocess.PIPE
     assert kwargs["env"]["PHOTON_SIDECAR_WATCH_STDIN"] == "1"
     assert spawned["patch_kwargs"]["creationflags"] == hidden_flags

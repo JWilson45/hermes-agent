@@ -28,6 +28,11 @@ js-install-tests:
 js-install-whatsapp-bridge:
     npm ci --ignore-scripts --no-audit --no-fund --prefix scripts/whatsapp-bridge
 
+# Install the Photon sidecar's own npm lockfile, without lifecycle scripts
+[group('setup')]
+js-install-photon-sidecar:
+    npm ci --ignore-scripts --no-audit --no-fund --prefix plugins/platforms/photon/sidecar
+
 # Prepare the pm-locked Electron binary the desktop app and its E2E suites launch
 [group('setup')]
 electron-runtime:
@@ -111,6 +116,11 @@ test-catalog:
 [group('test')]
 test-whatsapp-bridge:
     node --test scripts/whatsapp-bridge/*.test.mjs
+
+# Run the Photon sidecar's node tests (after `just js-install-photon-sidecar`)
+[group('test')]
+test-photon-sidecar:
+    node --test plugins/platforms/photon/sidecar/*.test.mjs
 
 # Run the bootstrap installer's Rust unit tests (needs cargo and Tauri's system libraries)
 [group('test')]

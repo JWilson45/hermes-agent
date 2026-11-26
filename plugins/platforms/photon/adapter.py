@@ -53,7 +53,7 @@ from .auth import load_project_credentials
 # mirror files. Tests monkeypatch sidecar_paths._SIDECAR_DIR.
 from .sidecar_paths import _NPM_ERROR_LOG_MAX_CHARS, _lock_newer_than_install, _npm_error_log, _sidecar_dir
 from .sidecar_paths import dir_writable as _dir_writable
-from hermes_constants import find_node_executable, with_hermes_node_path
+from hermes_constants import find_node_executable, get_hermes_home, with_hermes_node_path
 import contextlib
 
 logger = logging.getLogger(__name__)
@@ -1120,8 +1120,17 @@ class PhotonAdapter(BasePlatformAdapter):
         await self._ensure_sidecar_deps()
         await self._reap_stale_sidecar()
         env = with_hermes_node_path()
+        # Never inherit another profile's mini-app policy or rate settings.
+        for name in ("PHOTON_MINI_APPS", "PHOTON_MINI_APPS_CONFIG",
+                     "PHOTON_MINI_APP_RATE_LIMIT", "PHOTON_MINI_APP_RATE_WINDOW_MS"):
+            value = _get_scoped_secret(name)
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = str(value)
         env.update({
             "PHOTON_PROJECT_ID": self._project_id, "PHOTON_PROJECT_SECRET": self._project_secret,
+            "HERMES_HOME": str(get_hermes_home()),
             "PHOTON_SIDECAR_PORT": str(self._sidecar_port), "PHOTON_SIDECAR_BIND": self._sidecar_bind,
             "PHOTON_SIDECAR_TOKEN": self._sidecar_token,
             # Exit on stdin EOF so ANY gateway death (incl. SIGKILL) can't orphan it on the port.
@@ -1386,6 +1395,18 @@ class PhotonAdapter(BasePlatformAdapter):
                             file_name: Optional[str] = None, reply_to: Optional[str] = None,
                             metadata: Optional[dict[str, Any]] = None, **kwargs) -> SendResult:
         return await self._sidecar_send_attachment(chat_id, file_path, name=file_name, caption=caption)
+
+    async def send_mini_app(self, chat_id: str, url: str, reply_to: Optional[str] = None,
+                            metadata: Optional[dict[str, Any]] = None) -> SendResult:
+        """Send a LIVE Photon mini-app card via ``/send-mini-app``.
+
+        The sidecar enforces the safety model (fail closed): the route is gated
+        on ``PHOTON_MINI_APPS=true``, the recipient must be allowlisted and the
+        URL https + prefix-allowlisted in ``~/.hermes/photon-mini-apps.json``
+        (0600), with a sliding rate limit. See the sidecar README for the
+        policy schema. Button interactions are not delivered to Hermes.
+        """
+        return await self._post_send("/send-mini-app", {"spaceId": chat_id, "url": url}, structured=True)
 
     # send_animation: base falls back to send_image (iMessage renders GIFs inline as images).
 

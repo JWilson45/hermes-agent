@@ -217,6 +217,14 @@ Common issues:
 - **Message effects are supported.** Hermes sends text with native iMessage
   bubble/screen effects through spectrum-ts' iMessage `effect()` builder
   via the sidecar's `/send-effect` endpoint.
+- **Mini-app cards are supported (opt-in, default off).** With
+  `PHOTON_MINI_APPS=true` and a valid `0600` policy file
+  (`$HERMES_HOME/photon-mini-apps.json`, defaulting to `~/.hermes` — exact recipient space ids + HTTPS URL
+  origin/path prefixes), `hermes photon send-mini-app --to '<space-id>' --url '<https-url>'` sends a LIVE
+  mini-app card through the sidecar's `/send-mini-app` route (sliding rate
+  limit, fail closed, redacted errors). Button presses are not returned to
+  Hermes; app hosting and authenticated interaction handling are not included.
+  See the [sidecar README][sidecar-readme] for the full safety model.
 - **Photon's free quotas:** 5,000 messages per server per day,
   50 new-conversation initiations per shared line per day. Increases
   available — email `help@photon.codes`.
@@ -250,6 +258,10 @@ Common issues:
 | `PHOTON_MENTION_PATTERNS` | Hermes wake words  | JSON list / comma / newline regex patterns for group mentions |
 | `PHOTON_DASHBOARD_HOST`   | `app.photon.codes` | Override the dashboard / device-login host |
 | `PHOTON_SPECTRUM_HOST`    | `spectrum.photon.codes` | Override the Spectrum API host |
+| `PHOTON_MINI_APPS`        | `false`            | Enable the sidecar's `/send-mini-app` live-card route (exact `true`) |
+| `PHOTON_MINI_APPS_CONFIG` | `$HERMES_HOME/photon-mini-apps.json` | Mini-app policy allowlist (must be `0600`; fail closed) |
+| `PHOTON_MINI_APP_RATE_LIMIT` / `PHOTON_MINI_APP_RATE_WINDOW_MS` | `10` / `60000` | `/send-mini-app` sliding rate limit |
 
 [photon]: https://photon.codes/
 [app]: https://app.photon.codes/
+[sidecar-readme]: https://github.com/NousResearch/hermes-agent/blob/main/plugins/platforms/photon/sidecar/README.md

@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 from typing import Optional
+import httpx
 
 from hermes_cli.colors import Colors, color
 
@@ -36,6 +37,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                          help="Skip `npm install` inside the sidecar directory")
     subs.add_parser("status", help="Show login + project + sidecar dep state")
     subs.add_parser("install-sidecar", help="Run npm install inside the sidecar directory")
+    p_mini = subs.add_parser("send-mini-app", help="Send an allowlisted Photon mini-app card via the running gateway")
+    p_mini.add_argument("--to", required=True, help="Exact allowlisted Photon space ID")
+    p_mini.add_argument("--url", required=True, help="Allowlisted HTTPS app URL")
     p_telemetry = subs.add_parser("telemetry", help="Show or toggle Spectrum SDK telemetry (on/off)")
     p_telemetry.add_argument(
         "state", nargs="?", choices=("on", "off"),
@@ -397,9 +401,42 @@ def _install_sidecar() -> int:
     return proc.returncode
 
 
+def _cmd_send_mini_app(args: argparse.Namespace) -> int:
+    from . import adapter
+    from gateway.config import Platform, PlatformConfig, load_gateway_config
+    config = load_gateway_config().platforms.get(Platform("photon"), PlatformConfig())
+    port = adapter._coerce_port(
+        (config.extra or {}).get("sidecar_port") or adapter._get_scoped_secret("PHOTON_SIDECAR_PORT"),
+        adapter._DEFAULT_SIDECAR_PORT,
+    )
+    token = adapter._get_scoped_secret("PHOTON_SIDECAR_TOKEN")
+    if not token:
+        token, port, error = adapter._standalone_token_from_record(port)
+        if not token:
+            print(error, file=sys.stderr)
+            return 1
+    try:
+        with httpx.Client(timeout=30.0, trust_env=False) as client:
+            resp = client.post(f"http://{adapter._DEFAULT_SIDECAR_BIND}:{port}/send-mini-app",
+                               headers={"X-Hermes-Sidecar-Token": token},
+                               json={"spaceId": args.to, "url": args.url})
+        if resp.status_code >= 500:
+            print("Photon mini-app send failed; delivery may be uncertain. Do not retry blindly.", file=sys.stderr)
+            return 1
+        data = resp.json()
+        if resp.status_code != 200 or not isinstance(data, dict) or data.get("ok") is not True:
+            print("Photon mini-app send failed; check the gateway and policy.", file=sys.stderr)
+            return 1
+        print(f"Photon accepted mini-app send: {data.get('messageId') or 'unknown'}")
+        return 0
+    except (httpx.HTTPError, ValueError):
+        print("Photon mini-app send failed; delivery may be uncertain. Do not retry blindly.", file=sys.stderr)
+        return 1
+
+
 _COMMANDS = {
     "setup": _cmd_setup, "status": _cmd_status, "install-sidecar": lambda _args: _install_sidecar(),
-    "telemetry": _cmd_telemetry}
+    "telemetry": _cmd_telemetry, "send-mini-app": _cmd_send_mini_app}
 
 
 def gateway_setup() -> None:
